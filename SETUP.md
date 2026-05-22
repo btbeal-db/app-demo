@@ -126,28 +126,26 @@ The SP doesn't exist until the first deploy, so this grant can't happen
 earlier. Grab the SP's client id from the deployed app:
 
 ```bash
-SP=$(databricks apps get excellus-app --profile <p> | jq -r .service_principal_client_id)
-echo "App SP: $SP"
+databricks apps get excellus-app --profile <p> | jq -r .service_principal_client_id
 ```
 
-Then run two GRANT statements (against any SQL warehouse you have access to):
+Copy the printed UUID — that's the principal you'll grant to.
 
-```bash
-WID=$(databricks warehouses list --profile <p> --output json | jq -r '.[] | select(.state=="RUNNING") | .id' | head -1)
-HOST=$(databricks auth profiles | awk -v p=<p> '$1==p {print $2}')
-TOKEN=$(databricks auth token --profile <p> | jq -r .access_token)
+Open the workspace **SQL Editor** (left nav → **SQL Editor**), pick any
+running warehouse, and run these two statements (substitute your catalog,
+your schema, and the SP UUID into the backticks):
 
-for SQL in \
-  "GRANT USE CATALOG ON CATALOG <your-catalog> TO \`$SP\`" \
-  "GRANT USE SCHEMA  ON SCHEMA  <your-catalog>.<your-schema> TO \`$SP\`"; do
-  curl -sS -X POST "$HOST/api/2.0/sql/statements" \
-    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-    -d "{\"statement\":\"$SQL\",\"warehouse_id\":\"$WID\",\"wait_timeout\":\"30s\"}" \
-    | jq '{state: .status.state, error: .status.error}'
-done
+```sql
+GRANT USE CATALOG
+  ON CATALOG <your-catalog>
+  TO `<sp-client-id>`;
+
+GRANT USE SCHEMA
+  ON SCHEMA <your-catalog>.<your-schema>
+  TO `<sp-client-id>`;
 ```
 
-Both should print `{"state": "SUCCEEDED", "error": null}`.
+Both should report **succeeded** in the SQL Editor results panel.
 
 ### 3e. Verify
 
