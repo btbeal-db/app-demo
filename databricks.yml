@@ -28,6 +28,11 @@ resources:
           serving_endpoint:
             name: databricks-claude-sonnet-4-5
             permission: CAN_QUERY
+        - name: trace_table
+          uc_securable:
+            securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_spans
+            securable_type: TABLE
+            permission: MODIFY
 
 targets:
   dev:
