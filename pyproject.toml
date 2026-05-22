@@ -1,4 +1,20 @@
+# =============================================================================
+# pyproject.toml — Python project metadata & dependencies
+# =============================================================================
+#
+# Databricks Apps detects this file at build time and uses `uv` to resolve
+# and install the listed deps into the app container. (If a `requirements.txt`
+# is also present, pip is used instead and it takes precedence — we don't
+# include one, so uv handles everything.)
+#
+# The most important piece for an Apps deploy is the [project.scripts] entry
+# — that's the function `uv run start-server` calls in the container.
+# =============================================================================
+
 [build-system]
+# hatchling builds the wheel. Required so `agent_server` gets installed as a
+# proper Python package inside the container, which is what makes the
+# `agent_server.start_server:main` console script resolvable.
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
@@ -7,18 +23,27 @@ name = "app-demo"
 version = "0.1.0"
 description = "Minimal Databricks Apps agent (ResponsesAgent + ChatDatabricks)"
 requires-python = ">=3.11"
+
+# Runtime deps. Keep this list as small as possible — every package here
+# extends the cold-start time of the app.
 dependencies = [
-  "fastapi>=0.129.0",
-  "uvicorn>=0.41.0",
-  "mlflow>=3.10.0",
-  "databricks-agents>=1.9.3",
-  "databricks-langchain>=0.17.0",
-  "langchain>=1.0.0",
-  "langchain-core>=1.0.0",
+  "fastapi>=0.129.0",        # AgentServer's ASGI app is FastAPI under the hood
+  "uvicorn>=0.41.0",         # ASGI server that hosts the FastAPI app
+  "mlflow>=3.10.0",          # Provides mlflow.genai.agent_server + tracing
+  "databricks-agents>=1.9.3",# Bundles the Responses types + agent helpers
+  "databricks-langchain>=0.17.0",  # ChatDatabricks LangChain integration
+  "langchain>=1.0.0",        # LangChain framework
+  "langchain-core>=1.0.0",   # LangChain message types (HumanMessage, etc.)
 ]
 
 [tool.hatch.build.targets.wheel]
+# Tell hatchling which directory contains the importable package. Without
+# this, the wheel build can't find `agent_server/` and the console script
+# below can't resolve at runtime.
 packages = ["agent_server"]
 
 [project.scripts]
+# Console script alias. After install, `start-server` (a real executable in
+# the venv's bin dir) calls main() in agent_server.start_server. This is
+# what `command: ["uv", "run", "start-server"]` in databricks.yml hits.
 start-server = "agent_server.start_server:main"

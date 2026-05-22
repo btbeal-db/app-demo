@@ -1,14 +1,48 @@
+# =============================================================================
+# databricks.yml — Declarative Automation Bundle (DAB) config for the app
+# =============================================================================
+#
+# This file is what `databricks bundle deploy` reads. It declares:
+#   • the bundle (a logical grouping)
+#   • the Databricks App resource: its name, where the source code lives,
+#     how to start the process, and what env vars / external resources it
+#     needs access to
+#   • per-target overrides (dev vs. prod), each pinned to a workspace
+#
+# At deploy time the CLI uploads the source tree under source_code_path to
+# the workspace, creates/updates the App, wires up resource permissions
+# (e.g. serving endpoint CAN_QUERY for the app's service principal), and
+# materializes the env block — `value_from: <resource-name>` substitutes
+# the resource's runtime id (e.g. the experiment id) into the env var.
+# =============================================================================
+
 bundle:
   name: app_demo
 
 resources:
   apps:
+    # The map key (`app_demo`) is the *bundle-local* resource name — used in
+    # `databricks bundle run <key>`. The actual app name in the workspace is
+    # set by `name:` below.
     app_demo:
       name: excellus-app
       description: Minimal Databricks Apps agent (ResponsesAgent + ChatDatabricks)
+
+      # Path (relative to this file) of the source code that gets uploaded.
+      # `./` means the whole repo; .gitignore is respected.
       source_code_path: ./
+
       config:
+        # The command Apps runs to start the process. `uv run start-server`
+        # invokes the `start-server` console script declared in
+        # pyproject.toml ([project.scripts]), which calls main() in
+        # agent_server/start_server.py. `uv` is the default package manager
+        # when the repo has a pyproject.toml.
         command: ["uv", "run", "start-server"]
+
+        # Env vars injected into the running container.
+        # `value:` is a literal string. `value_from:` looks up a resource by
+        # name (defined below) and substitutes its runtime id.
         env:
           - name: MLFLOW_TRACKING_URI
             value: databricks
@@ -19,21 +53,46 @@ resources:
           - name: LLM_ENDPOINT_NAME
             value_from: llm
 
+      # Resources the app needs at runtime. The bundle grants the app's
+      # service principal the declared `permission` on each resource — no
+      # manual ACL work required (unless the perm isn't supported by DABs,
+      # see note on traces below).
       resources:
+        # The MLflow experiment that traces get written into. CAN_MANAGE
+        # lets the app create runs/traces under it.
         - name: experiment
           experiment:
             experiment_id: "3212027249152542"
             permission: CAN_MANAGE
+
+        # The serving endpoint the agent calls. CAN_QUERY is the minimum
+        # permission for invocation.
         - name: llm
           serving_endpoint:
             name: databricks-claude-sonnet-4-5
             permission: CAN_QUERY
+
+        # MLflow 3 GenAI tracing writes spans into a UC table named
+        # `<exp_id>_otel_spans` under the experiment's configured trace
+        # storage location. The experiment grant above covers metadata
+        # only — we also need write access to this table or traces get
+        # dropped with PERMISSION_DENIED.
+        #
+        # Caveat: DABs `uc_securable` only supports CONNECTION / FUNCTION /
+        # TABLE / VOLUME (no CATALOG or SCHEMA) and one permission per
+        # entry. So this gives us the spans-table MODIFY; the matching
+        # USE CATALOG / USE SCHEMA / SELECT (and the `_otel_annotations`
+        # table) had to be granted via SQL once at setup time.
         - name: trace_table
           uc_securable:
             securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_spans
             securable_type: TABLE
             permission: MODIFY
 
+# Per-target overrides. `default: true` makes `dev` the implicit target.
+# `mode: development` adds a per-user prefix to bundle paths so multiple
+# people can deploy the same bundle to the same workspace without colliding.
+# `mode: production` strips the prefix and requires an explicit deploy.
 targets:
   dev:
     default: true
