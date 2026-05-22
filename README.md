@@ -1,9 +1,11 @@
-# app-demo — the simplest agent on Databricks Apps
+# app-demo — stateful agent on Databricks Apps (LangGraph branch)
 
-A minimal, working example of a Databricks Apps agent. It exposes an
-OpenAI Responses-API-compatible `/responses` endpoint backed by Claude
-Sonnet 4.5 (via `ChatDatabricks`), with MLflow tracing into a workspace
-experiment, deployed end-to-end via a Declarative Automation Bundle.
+A minimal but **stateful** Databricks Apps agent. The base of `main`
+demonstrates the simplest possible stateless agent; this branch
+(`feat/stateful-langgraph`) adds a LangGraph graph compiled with an
+`InMemorySaver` so that requests carrying the same `thread_id` continue
+the same conversation. Same `/responses` endpoint, same MLflow tracing,
+same DAB deploy story — plus thread-keyed memory.
 
 ## What's in the repo
 
@@ -45,34 +47,71 @@ databricks bundle deploy   --profile <p>
 databricks bundle run app_demo --profile <p>
 ```
 
-## Try it
+## Try it — thread memory
+
+Send a thread_id via `custom_inputs.thread_id`. The same thread continues
+the same conversation; a different thread starts fresh.
 
 **From your shell (curl)**:
 
 ```bash
 TOKEN=$(databricks auth token --profile=<profile> | jq -r .access_token)
-curl -sS -X POST "https://<your-app>.databricksapps.com/responses" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"input":[{"role":"user","content":[{"type":"input_text","text":"What is 2+2?"}]}]}'
+URL="https://<your-app>.databricksapps.com/responses"
+
+# Turn 1 — introduce yourself
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "input": [{"role":"user","content":[{"type":"input_text","text":"My name is Brennan."}]}],
+    "custom_inputs": {"thread_id": "demo-1"}
+  }'
+
+# Turn 2 — same thread, ask the agent what it remembers
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "input": [{"role":"user","content":[{"type":"input_text","text":"What is my name?"}]}],
+    "custom_inputs": {"thread_id": "demo-1"}
+  }'
+# → "Your name is Brennan."
+
+# A different thread has no memory of demo-1
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "input": [{"role":"user","content":[{"type":"input_text","text":"What is my name?"}]}],
+    "custom_inputs": {"thread_id": "demo-2"}
+  }'
+# → "I don't know your name."
 ```
 
-**From a Databricks notebook** (paste into a cell — uses your notebook auth automatically):
+Note that you only send the **latest** user message — LangGraph rehydrates
+the prior turns from the checkpointer.
+
+**From a Databricks notebook** (uses your workspace auth):
 
 ```python
-import requests
+import requests, uuid
 from databricks.sdk import WorkspaceClient
 
 w = WorkspaceClient()
 app_url = "https://<your-app>.databricksapps.com/responses"
 token = w.config.authenticate()["Authorization"].split(" ", 1)[1]
+thread_id = str(uuid.uuid4())
 
-r = requests.post(
-    app_url,
-    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-    json={"input": [{"role": "user", "content": [{"type": "input_text", "text": "What is 2+2?"}]}]},
-)
-print(r.json())
+def ask(text):
+    r = requests.post(
+        app_url,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}],
+            "custom_inputs": {"thread_id": thread_id},
+        },
+    )
+    return r.json()["output"][0]["content"][0]["text"]
+
+print(ask("My name is Brennan."))
+print(ask("What is my name?"))   # → "Your name is Brennan."
 ```
 
 ## Tracing
@@ -88,6 +127,50 @@ to inspect inputs, outputs, latencies, and the underlying LLM call.
 > experiment. `databricks.yml` declares the four table-level grants;
 > `USE CATALOG` / `USE SCHEMA` are applied via SQL once per workspace —
 > see **[SETUP.md § 3d](./SETUP.md#3d-grant-the-sp-use-catalog-and-use-schema)**.
+
+## When this is not enough — promoting to Lakebase
+
+`InMemorySaver` is fine for one-process demos. The moment Apps scales to
+multiple workers or replicas, threads stop being durable: a request that
+lands on worker A then worker B sees an empty thread. Every redeploy /
+autoscale / platform restart wipes the dict.
+
+The migration to a real backing store is small. Lakebase is a managed
+Postgres instance, so `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`
+plugs in directly.
+
+**Agent code** — swap `_build_graph()`:
+
+```python
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+# In start_server (async startup) or first-request bootstrap:
+checkpointer = await AsyncPostgresSaver.from_conn_string(
+    os.environ["PGURI"]
+).__aenter__()
+await checkpointer.setup()  # one-time DDL — idempotent
+GRAPH = _build_graph(checkpointer=checkpointer)
+```
+
+**Bundle** — add a Lakebase resource to `databricks.yml`:
+
+```yaml
+resources:
+  - name: state_db
+    database:
+      instance_name: <your-lakebase-instance>
+      database_name: databricks_postgres
+      permission: CAN_CONNECT_AND_CREATE
+```
+
+Lakebase is one of the resource types DABs natively supports (unlike the
+catalog/schema gap documented in [SETUP.md](./SETUP.md)). The app gets
+`PGHOST` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` env vars injected at
+runtime; assemble them into the connection string in code.
+
+That single swap turns this into a horizontally-scalable, restart-durable
+stateful agent. No other changes to the graph, the handlers, or the
+caller-side thread-id protocol.
 
 ## Local development
 
