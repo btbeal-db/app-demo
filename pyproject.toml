@@ -3,17 +3,22 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "simple-apps-agent"
+name = "app-demo"
 version = "0.1.0"
+description = "Minimal Databricks Apps agent (ResponsesAgent + ChatDatabricks)"
 requires-python = ">=3.11"
 dependencies = [
-  "mlflow>=3.1.0",
-  "databricks-sdk",
-  "databricks-openai",
-  "databricks-langchain",
-  "langchain",
-  "langgraph",
+  "fastapi>=0.129.0",
+  "uvicorn>=0.41.0",
+  "mlflow>=3.10.0",
+  "databricks-agents>=1.9.3",
+  "databricks-langchain>=0.17.0",
+  "langchain>=1.0.0",
+  "langchain-core>=1.0.0",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["agent_server"]
+
 [project.scripts]
-start-app = "app:main"
+start-server = "agent_server.start_server:main"

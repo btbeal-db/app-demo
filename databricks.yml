@@ -1,18 +1,15 @@
 bundle:
-  name: simple_apps_agent
+  name: app_demo
 
 resources:
   apps:
-    simple_agent:
-      name: simple-agent
+    app_demo:
+      name: excellus-app
+      description: Minimal Databricks Apps agent (ResponsesAgent + ChatDatabricks)
       source_code_path: ./
       config:
-        # This command starts the app process.
-        # In practice you can use the same pattern the official templates use:
-        # uv run <startup-command>
-        command: ["uv", "run", "start-app"]
+        command: ["uv", "run", "start-server"]
         env:
-          # These wire MLflow in the same pattern shown in the Databricks agent docs.
           - name: MLFLOW_TRACKING_URI
             value: databricks
           - name: MLFLOW_REGISTRY_URI
@@ -25,10 +22,8 @@ resources:
       resources:
         - name: experiment
           experiment:
-            # Replace with a real workspace experiment id.
             experiment_id: "3212027249152542"
-            permission: CAN_EDIT
-
+            permission: CAN_MANAGE
         - name: llm
           serving_endpoint:
             name: databricks-claude-sonnet-4-5
@@ -39,10 +34,4 @@ targets:
     default: true
     mode: development
     workspace:
-      host: https://<your-workspace-host>
-
-  prod:
-    mode: production
-    workspace:
-      host: https://<your-workspace-host>
-      root_path: /Workspace/Users/<service-principal-or-owner>/.bundle/${bundle.name}/${bundle.target}
+      host: https://fevm-agentbuilder-serverless-stable.cloud.databricks.com
