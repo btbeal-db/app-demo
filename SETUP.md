@@ -34,6 +34,7 @@ external objects. Here is the complete inventory.
 | The UC **schema** under that catalog | `USE SCHEMA` | ❌ — DABs `uc_securable` doesn't support `SCHEMA` | Manual SQL grant once per workspace. |
 | `<exp_id>_otel_spans` table | `SELECT` + `MODIFY` | ✅ via two `uc_securable` entries | One DABs entry per permission (`permission:` is singular). |
 | `<exp_id>_otel_annotations` table | `SELECT` + `MODIFY` | ✅ via two `uc_securable` entries | Same as above. Used for assessments/feedback. |
+| The Lakebase Autoscaling **branch + database** for thread state | `CAN_CONNECT_AND_CREATE` | ✅ via `postgres` resource | The project + branch + database must already exist; DABs does not create them. See § 3f below. |
 
 **The DABs gap**: of the six rows above, four are fully declarative in
 `databricks.yml`. The two `USE` grants on the parent catalog and schema
@@ -146,6 +147,51 @@ GRANT USE SCHEMA
 ```
 
 Both should report **succeeded** in the SQL Editor results panel.
+
+### 3f. Provision the Lakebase project (for thread state)
+
+The agent persists conversation memory into a Lakebase Autoscaling
+project. You need a project, a branch, and a database before the
+bundle's `postgres:` resource can resolve.
+
+1. Create a project (auto-creates the `production` branch + a `primary`
+   read-write endpoint):
+
+   ```bash
+   databricks postgres create-project <project-id> \
+     --json '{"spec": {"display_name": "App Demo"}}' \
+     --profile <p>
+   ```
+
+2. Verify it's ready (the endpoint state should reach `ACTIVE`):
+
+   ```bash
+   databricks postgres list-endpoints \
+     projects/<project-id>/branches/production --profile <p>
+   ```
+
+3. The project auto-creates a default database named `databricks-postgres`
+   (note the **hyphen** — the API resource id uses a hyphen even though
+   the Postgres-level database name is `databricks_postgres`). Confirm:
+
+   ```bash
+   databricks postgres list-databases \
+     projects/<project-id>/branches/production --profile <p>
+   ```
+
+4. Edit `databricks.yml` to point the `postgres:` resource at your
+   project (three places — `branch:`, `database:`, and the trace-table
+   paths above stay separate):
+
+   ```yaml
+   - name: state_db
+     postgres:
+       branch: projects/<project-id>/branches/production
+       database: projects/<project-id>/branches/production/databases/databricks-postgres
+       permission: CAN_CONNECT_AND_CREATE
+   ```
+
+   Then redeploy: `databricks bundle deploy && databricks bundle run app_demo`.
 
 ### 3e. Verify
 

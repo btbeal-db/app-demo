@@ -1,46 +1,38 @@
 # =============================================================================
-# start_server.py — boot the MLflow AgentServer
+# start_server.py — boot the AgentServer + run Lakebase DDL at startup
 # =============================================================================
 #
-# This is the process entrypoint that `uv run start-server` calls (the script
-# alias is defined in pyproject.toml under [project.scripts]).
-#
-# The job of this file is small:
-#   1. Import `agent_server.agent` so that its @invoke/@stream decorators run
-#      and register themselves with the AgentServer registry. (The decorators
-#      are global — importing the module is what wires them up.)
-#   2. Build an AgentServer and expose its FastAPI ASGI app as a *module-level*
-#      variable named `app`. Uvicorn workers need that to fork properly.
-#   3. Provide a `main()` that starts the uvicorn server.
+# Two things this file does:
+#   1. Build the AgentServer and expose its FastAPI ASGI app as `app`.
+#   2. Wrap the FastAPI lifespan so that `setup_lakebase()` runs exactly
+#      once when each uvicorn worker boots — this creates the checkpoint
+#      tables in Lakebase if they don't already exist (idempotent). Per-
+#      request handlers then assume the schema is ready.
 # -----------------------------------------------------------------------------
+
+from contextlib import asynccontextmanager
 
 from mlflow.genai.agent_server import AgentServer
 
-# Importing this module triggers the @invoke / @stream decorators in agent.py,
-# which register the handlers with AgentServer's internal registry. Without
-# this import, AgentServer would start but have no routes to serve.
-import agent_server.agent  # noqa: F401
+import agent_server.agent  # noqa: F401 — registers @invoke/@stream handlers
+from agent_server.agent import setup_lakebase
 
-# AgentServer args:
-#   • "ResponsesAgent" — the agent kind. Tells the server to expose the
-#     /responses endpoint with Responses-API request/response shapes.
-#   • enable_chat_proxy=True — also mounts a /chat/completions route that
-#     translates OpenAI Chat-Completions-shaped requests into calls to the
-#     same @invoke / @stream handlers. Useful if you ever want to point an
-#     OpenAI SDK (or one of the fuller Databricks app templates that ships
-#     a chat frontend) at this app without writing a second handler. Set
-#     it to False if you only need /responses.
 server = AgentServer("ResponsesAgent", enable_chat_proxy=True)
-
-# Module-level ASGI app. This is referenced by `app_import_string` below and
-# by any external uvicorn invocation. Defining it at module scope (not inside
-# main) lets uvicorn spawn multiple workers, each re-importing the module
-# and getting their own copy of the app.
 app = server.app
+
+_original_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _lifespan(asgi_app):
+    # Idempotent DDL — creates checkpoint tables on first boot.
+    await setup_lakebase()
+    async with _original_lifespan(asgi_app):
+        yield
+
+
+app.router.lifespan_context = _lifespan
 
 
 def main():
-    # `app_import_string` tells AgentServer how to point uvicorn at the ASGI
-    # app — uvicorn imports `agent_server.start_server` in each worker and
-    # looks up the `app` attribute.
     server.run(app_import_string="agent_server.start_server:app")

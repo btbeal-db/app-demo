@@ -52,6 +52,13 @@ resources:
             value_from: experiment
           - name: LLM_ENDPOINT_NAME
             value_from: llm
+          # `value_from: postgres` resolves to the Lakebase endpoint
+          # hostname/URI for the Autoscaling project declared below.
+          # The library picks this up to mint OAuth tokens via the SP.
+          - name: LAKEBASE_AUTOSCALING_ENDPOINT
+            value_from: state_db
+          - name: LAKEBASE_AGENT_MEMORY_SCHEMA
+            value: app_demo
 
       # Resources the app needs at runtime. The bundle grants the app's
       # service principal the declared `permission` on each resource — no
@@ -111,6 +118,20 @@ resources:
             securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_annotations
             securable_type: TABLE
             permission: MODIFY
+
+        # ---------------------------------------------------------------
+        # Lakebase Postgres (LangGraph thread state)
+        # ---------------------------------------------------------------
+        # DABs `postgres:` is the Autoscaling-tier resource — it grants
+        # the app SP CAN_CONNECT_AND_CREATE on the named branch+database,
+        # and (via `value_from: state_db` above) injects the connection
+        # endpoint URI into LAKEBASE_AUTOSCALING_ENDPOINT so the
+        # AsyncCheckpointSaver in agent.py can mint OAuth tokens for it.
+        - name: state_db
+          postgres:
+            branch: projects/agent-sweet-demo/branches/production
+            database: projects/agent-sweet-demo/branches/production/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE
 
 # Per-target overrides. `default: true` makes `dev` the implicit target.
 # `mode: development` adds a per-user prefix to bundle paths so multiple

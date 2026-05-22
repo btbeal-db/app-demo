@@ -1,40 +1,37 @@
 # =============================================================================
-# agent.py — stateful agent using a LangGraph graph + InMemorySaver
+# agent.py — stateful agent backed by Databricks Lakebase Postgres
 # =============================================================================
 #
-# This is the stateful variant of the demo. The agent is now a 1-node
-# LangGraph graph compiled with a `checkpointer`, which means the conversation
-# state is persisted across requests keyed by a `thread_id`. Re-send the same
-# thread_id on a subsequent request and LangGraph replays the prior turns
-# before calling the LLM, so the model "remembers" the conversation without
-# the caller having to resend the history.
+# The agent is a 1-node LangGraph graph compiled per-request with an
+# `AsyncCheckpointSaver` pointed at a Databricks Lakebase Autoscaling
+# project. Lakebase is fully-managed Postgres on Databricks, so the
+# checkpointer survives restarts, scales horizontally with the app, and
+# uses the app's own service-principal OAuth identity to connect (no
+# hard-coded credentials, automatic token refresh handled by the SDK).
 #
-# Why a graph for what is effectively a one-shot LLM call?
-#   • Checkpointing is a property of the *graph*, not of the model — to opt
-#     into LangGraph's thread-keyed memory you need a compiled graph with a
-#     `checkpointer=` argument.
-#   • The same shape extends cleanly: add a tool-calling node, a router, a
-#     retrieval step, etc., and the persistence story doesn't change.
+# Why `AsyncCheckpointSaver` and not raw `AsyncPostgresSaver`?
+#   • Lakebase issues short-lived OAuth tokens (~1h) instead of static
+#     passwords. `AsyncCheckpointSaver` from `databricks-langchain`
+#     wraps psycopg + Databricks SDK so the token refresh is transparent.
+#   • It also resolves the autoscaling endpoint hostname (injected via
+#     `LAKEBASE_AUTOSCALING_ENDPOINT` by DABs) into a project/branch path
+#     under the hood. We just hand it the env var.
 #
-# Where this is appropriate:
-#   • Single-replica demos, local dev, "show me thread memory works" tests.
-# Where this *breaks*:
-#   • Multiple workers/replicas — InMemorySaver is per-process, so a request
-#     that lands on worker A then worker B sees an empty thread.
-#   • Any restart (redeploy, autoscale, platform-side restart) wipes state.
-#
-# For production: swap `InMemorySaver()` for `AsyncPostgresSaver` pointed at
-# a Databricks Lakebase instance (see README "Promoting to Lakebase").
+# Why the context manager per request?
+#   • Matches the canonical Databricks app-template pattern.
+#   • Connections are pooled inside the saver, so this is cheap.
+#   • Compiling the LangGraph builder is also cheap; the expensive work
+#     (LLM call) dominates.
 # -----------------------------------------------------------------------------
 
 import logging
 import os
-from typing import AsyncGenerator, Optional
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 import mlflow
-from databricks_langchain import ChatDatabricks
+from databricks_langchain import AsyncCheckpointSaver, ChatDatabricks
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from mlflow.genai.agent_server import invoke, stream
 from mlflow.types.responses import (
@@ -49,43 +46,58 @@ mlflow.langchain.autolog()
 LLM_ENDPOINT = os.getenv("LLM_ENDPOINT_NAME", "databricks-claude-sonnet-4-5")
 SYSTEM_PROMPT = "You are a concise helper. Answer directly."
 
+# Lakebase connection config — populated by DABs from the `postgres:`
+# resource declaration in databricks.yml (see env block there).
+LAKEBASE_ENDPOINT = os.environ["LAKEBASE_AUTOSCALING_ENDPOINT"]
+LAKEBASE_SCHEMA = os.getenv("LAKEBASE_AGENT_MEMORY_SCHEMA", "app_demo")
+
+
+# -----------------------------------------------------------------------------
+# Lakebase checkpointer (async context manager)
+# -----------------------------------------------------------------------------
+@asynccontextmanager
+async def _lakebase_checkpointer():
+    """Yield a LangGraph checkpointer backed by Lakebase.
+
+    Each entry opens a pooled connection (token-refreshed under the hood).
+    Use at request scope: `async with _lakebase_checkpointer() as ckpt: ...`.
+    """
+    async with AsyncCheckpointSaver(
+        autoscaling_endpoint=LAKEBASE_ENDPOINT,
+        schema=LAKEBASE_SCHEMA,
+    ) as ckpt:
+        yield ckpt
+
+
+async def setup_lakebase() -> None:
+    """One-time DDL — creates the checkpoint tables under `LAKEBASE_SCHEMA`.
+    Called from the FastAPI lifespan in start_server.py at app startup.
+    Idempotent."""
+    async with _lakebase_checkpointer() as ckpt:
+        await ckpt.setup()
+
 
 # -----------------------------------------------------------------------------
 # Graph definition
 # -----------------------------------------------------------------------------
 async def call_model(state: MessagesState) -> dict:
-    """The only node in the graph — turn the conversation so far into an
-    LLM call and append the reply to state."""
+    """The only node in the graph — LLM call with the system prompt
+    prepended on a fresh thread, the existing history (rehydrated from
+    the checkpointer) on a continuation."""
     llm = ChatDatabricks(endpoint=LLM_ENDPOINT, temperature=0.0)
-
-    # Ensure the system prompt is present exactly once at the head of the
-    # message list. On a brand-new thread, `state["messages"]` is just the
-    # one HumanMessage we passed in. On a continuation, it's the full
-    # history rehydrated by the checkpointer.
     messages = state["messages"]
     if not messages or not isinstance(messages[0], SystemMessage):
         messages = [SystemMessage(content=SYSTEM_PROMPT), *messages]
-
     reply = await llm.ainvoke(messages)
-    # MessagesState uses an additive reducer — returning `messages` here
-    # appends to (rather than replaces) the persisted message list.
     return {"messages": [reply]}
 
 
-def _build_graph():
+def _build_graph(checkpointer):
     builder = StateGraph(MessagesState)
     builder.add_node("call_model", call_model)
     builder.add_edge(START, "call_model")
     builder.add_edge("call_model", END)
-
-    # Module-level checkpointer. With multiple uvicorn workers each worker
-    # gets its *own* InMemorySaver — see the warning at the top of this
-    # file. For real deployments swap this for AsyncPostgresSaver.
-    checkpointer = InMemorySaver()
     return builder.compile(checkpointer=checkpointer)
-
-
-GRAPH = _build_graph()
 
 
 # -----------------------------------------------------------------------------
@@ -94,14 +106,11 @@ GRAPH = _build_graph()
 def _thread_id(request: ResponsesAgentRequest) -> str:
     """Resolve the LangGraph thread_id from the incoming request.
 
-    Preferred:  request.context.conversation_id  (the Responses-API canonical
-                place for a multi-turn conversation key — the workspace
-                Playground and chat UIs populate this automatically).
+    Preferred:  request.context.conversation_id  (Responses-API canonical;
+                populated automatically by Databricks chat UIs / Playground)
     Fallback:   request.custom_inputs["thread_id"]  (free-form extension
-                channel, easiest to send from curl/scripts).
-    Default:    "default"  (so a caller who omits the id still gets *a*
-                memory, shared globally — useful for the quickest smoke
-                test, not appropriate for real workloads).
+                channel, easiest to send from curl/scripts)
+    Default:    "default"  (smoke-test convenience)
     """
     if request.context and request.context.conversation_id:
         return request.context.conversation_id
@@ -112,12 +121,9 @@ def _thread_id(request: ResponsesAgentRequest) -> str:
 
 
 def _latest_user_text(request: ResponsesAgentRequest) -> str:
-    """Pull the latest user turn out of the Responses-API input list.
-
-    The caller does NOT need to resend prior turns when a thread_id is set —
-    LangGraph replays them from the checkpointer. We only forward the most
-    recent user message to the graph.
-    """
+    """Pull just the latest user turn. LangGraph replays prior turns from
+    the checkpointer when a known thread_id is reused — we never resend
+    history."""
     for item in reversed(request.input):
         raw = item.model_dump() if hasattr(item, "model_dump") else dict(item)
         if raw.get("role") != "user":
@@ -153,21 +159,18 @@ async def stream_handler(
     request: ResponsesAgentRequest,
 ) -> AsyncGenerator[ResponsesAgentStreamEvent, None]:
     thread_id = _thread_id(request)
-
-    # Tag the MLflow trace with the same id so traces from one conversation
-    # group together in the experiment UI's session view.
     mlflow.update_current_trace(metadata={"mlflow.trace.session": thread_id})
 
-    # LangGraph reads/writes checkpoints scoped to this thread_id.
     config = {"configurable": {"thread_id": thread_id}}
-
     user_text = _latest_user_text(request)
-    result = await GRAPH.ainvoke(
-        {"messages": [HumanMessage(content=user_text)]},
-        config=config,
-    )
 
-    # The last message in returned state is the assistant reply.
+    async with _lakebase_checkpointer() as ckpt:
+        graph = _build_graph(ckpt)
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content=user_text)]},
+            config=config,
+        )
+
     assistant_msg = result["messages"][-1]
     item = {
         "id": "msg_1",

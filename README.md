@@ -1,11 +1,14 @@
-# app-demo — stateful agent on Databricks Apps (LangGraph branch)
+# app-demo — stateful agent on Databricks Apps (LangGraph + Lakebase branch)
 
-A minimal but **stateful** Databricks Apps agent. The base of `main`
-demonstrates the simplest possible stateless agent; this branch
-(`feat/stateful-langgraph`) adds a LangGraph graph compiled with an
-`InMemorySaver` so that requests carrying the same `thread_id` continue
-the same conversation. Same `/responses` endpoint, same MLflow tracing,
-same DAB deploy story — plus thread-keyed memory.
+A working Databricks Apps agent with **durable** conversation memory. A
+LangGraph graph compiled with `AsyncCheckpointSaver` persists thread
+state into a Databricks Lakebase Postgres database, so requests carrying
+the same `thread_id` continue the same conversation — across worker
+restarts, replicas, and redeploys.
+
+Same `/responses` endpoint, same MLflow tracing, same DAB deploy
+story — plus thread-keyed memory that doesn't evaporate when the
+container restarts.
 
 ## What's in the repo
 
@@ -13,44 +16,31 @@ same DAB deploy story — plus thread-keyed memory.
 .
 ├── agent_server/
 │   ├── __init__.py        # marks the dir as a Python package
-│   ├── agent.py           # the agent logic — @invoke / @stream handlers
-│   └── start_server.py    # boots MLflow's AgentServer (FastAPI + uvicorn)
-├── databricks.yml         # DAB config: app, env, resource permissions
+│   ├── agent.py           # LangGraph graph + AsyncCheckpointSaver + handlers
+│   └── start_server.py    # AgentServer boot + Lakebase DDL lifespan
+├── databricks.yml         # DAB config: app, env, resource permissions, postgres
 ├── pyproject.toml         # deps + start-server console script
 ├── .gitignore
-└── README.md
+├── README.md
+└── SETUP.md               # end-to-end deploy walkthrough
 ```
 
 ### Why each file is required
 
 | File | Why it has to exist |
 |---|---|
-| `agent_server/agent.py` | The actual agent. Defines async `@invoke()` and `@stream()` handlers — the only two functions MLflow's `AgentServer` looks for. `/responses` (non-streaming) routes to `@invoke`; `/responses?stream=true` and the Apps chat UI route to `@stream`. |
-| `agent_server/start_server.py` | The process entrypoint. Imports `agent_server.agent` to trigger handler registration, builds an `AgentServer`, and exposes the FastAPI ASGI app + a `main()` for uvicorn. |
-| `agent_server/__init__.py` | Makes `agent_server` an importable Python package so the start-server script can resolve `agent_server.start_server:main`. Empty file but required. |
-| `pyproject.toml` | Tells the Apps runtime which dependencies to install via `uv`, and declares the `start-server` console script that `databricks.yml`'s command line runs. Without it, Apps logs `"No dependencies file found. Skipping installation."` and the app crashes at import. |
-| `databricks.yml` | The deploy contract. Names the app, says where the source lives, sets the start command and env vars, and declares the resources the app needs at runtime (LLM endpoint, MLflow experiment, trace table) along with the permission the app's service principal should get on each. Without it, you'd be wiring permissions by hand in the UI. |
-| `.gitignore` | Standard hygiene — keeps `.venv/`, `uv.lock`, build artifacts, and `.databricks/` cache out of the repo. |
-
-## Deploy
-
-See **[SETUP.md](./SETUP.md)** for the definitive walkthrough — including
-which resources the app needs, what permissions DABs handles for you,
-and the two `USE CATALOG` / `USE SCHEMA` grants you still have to apply
-by hand.
-
-TL;DR for an already-set-up workspace:
-
-```bash
-databricks bundle validate --profile <p>
-databricks bundle deploy   --profile <p>
-databricks bundle run app_demo --profile <p>
-```
+| `agent_server/agent.py` | The agent. Wraps a `ChatDatabricks` LLM call in a 1-node `MessagesState` LangGraph compiled with `AsyncCheckpointSaver`. Exposes `@invoke()` and `@stream()` handlers — the only two functions MLflow's `AgentServer` looks for. Reads `LAKEBASE_AUTOSCALING_ENDPOINT` (injected by DABs) to connect. |
+| `agent_server/start_server.py` | The process entrypoint. Imports `agent_server.agent` to register handlers, builds an `AgentServer`, and wraps the FastAPI lifespan so `setup_lakebase()` (the idempotent DDL that creates the checkpoint tables) runs once when each worker boots. |
+| `agent_server/__init__.py` | Makes `agent_server` an importable Python package. Empty but required. |
+| `pyproject.toml` | Tells Apps which dependencies to install via `uv` (note `databricks-langchain[memory]` for `AsyncCheckpointSaver` + psycopg). Declares the `start-server` console script that `databricks.yml`'s command runs. |
+| `databricks.yml` | The deploy contract. Names the app, sets the start command and env vars, and declares every external resource the app needs (LLM endpoint, MLflow experiment, trace tables, **Lakebase postgres branch/database**) with the permission the app SP should get on each. |
+| `.gitignore` | Standard hygiene. |
 
 ## Try it — thread memory
 
 Send a thread_id via `custom_inputs.thread_id`. The same thread continues
-the same conversation; a different thread starts fresh.
+the same conversation across **restarts** (try it — stop the app, start
+it back up, hit the same thread and you'll still get the same memory).
 
 **From your shell (curl)**:
 
@@ -62,18 +52,18 @@ URL="https://<your-app>.databricksapps.com/responses"
 curl -sS -X POST "$URL" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{
-    "input": [{"role":"user","content":[{"type":"input_text","text":"My name is Brennan."}]}],
+    "input": [{"role":"user","content":[{"type":"input_text","text":"My name is Brennan and my favorite color is teal."}]}],
     "custom_inputs": {"thread_id": "demo-1"}
   }'
 
-# Turn 2 — same thread, ask the agent what it remembers
+# Turn 2 — same thread, the agent recalls from Lakebase
 curl -sS -X POST "$URL" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{
-    "input": [{"role":"user","content":[{"type":"input_text","text":"What is my name?"}]}],
+    "input": [{"role":"user","content":[{"type":"input_text","text":"What is my name and color?"}]}],
     "custom_inputs": {"thread_id": "demo-1"}
   }'
-# → "Your name is Brennan."
+# → "Your name is Brennan and your favorite color is teal."
 
 # A different thread has no memory of demo-1
 curl -sS -X POST "$URL" \
@@ -86,9 +76,9 @@ curl -sS -X POST "$URL" \
 ```
 
 Note that you only send the **latest** user message — LangGraph rehydrates
-the prior turns from the checkpointer.
+the prior turns from Lakebase using the `thread_id`.
 
-**From a Databricks notebook** (uses your workspace auth):
+**From a Databricks notebook**:
 
 ```python
 import requests, uuid
@@ -114,69 +104,33 @@ print(ask("My name is Brennan."))
 print(ask("What is my name?"))   # → "Your name is Brennan."
 ```
 
-## Tracing
+## How the Lakebase wiring works
 
-`mlflow.langchain.autolog()` in `agent.py` plus the `MLFLOW_EXPERIMENT_ID` env
-var wired in `databricks.yml` means every request becomes a trace under the
-configured experiment. Open the experiment in the workspace → **Traces** tab
-to inspect inputs, outputs, latencies, and the underlying LLM call.
+1. **`databricks.yml`** declares a `postgres:` resource pointing at a
+   Lakebase Autoscaling project/branch/database with permission
+   `CAN_CONNECT_AND_CREATE`.
+2. **DABs** grants the app's service principal that permission and injects
+   the connection endpoint URI into the container as the
+   `LAKEBASE_AUTOSCALING_ENDPOINT` env var via
+   `value_from: state_db`.
+3. **`agent_server/agent.py`** reads that env var and constructs an
+   `AsyncCheckpointSaver(autoscaling_endpoint=…)`. The
+   `databricks-langchain` library mints short-lived OAuth tokens from
+   the SP identity behind the scenes and refreshes them automatically.
+4. **`agent_server/start_server.py`** wraps the FastAPI lifespan to call
+   `checkpointer.setup()` once at startup — idempotent DDL that
+   creates `checkpoints`, `checkpoint_writes`, `checkpoint_blobs`, and
+   `checkpoint_migrations` under the configured schema.
+5. **`@stream` handler** opens the checkpointer per request as an async
+   context manager, compiles the graph with it, and lets LangGraph
+   handle the load/save by thread_id.
 
-> MLflow 3 GenAI tracing persists spans into Unity Catalog tables
-> (`<catalog>.<schema>.<exp_id>_otel_{spans,annotations}`), which means the
-> app's service principal needs permissions beyond just `CAN_MANAGE` on the
-> experiment. `databricks.yml` declares the four table-level grants;
-> `USE CATALOG` / `USE SCHEMA` are applied via SQL once per workspace —
-> see **[SETUP.md § 3d](./SETUP.md#3d-grant-the-sp-use-catalog-and-use-schema)**.
-
-## When this is not enough — promoting to Lakebase
-
-`InMemorySaver` is fine for one-process demos. The moment Apps scales to
-multiple workers or replicas, threads stop being durable: a request that
-lands on worker A then worker B sees an empty thread. Every redeploy /
-autoscale / platform restart wipes the dict.
-
-The migration to a real backing store is small. Lakebase is a managed
-Postgres instance, so `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`
-plugs in directly.
-
-**Agent code** — swap `_build_graph()`:
-
-```python
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-# In start_server (async startup) or first-request bootstrap:
-checkpointer = await AsyncPostgresSaver.from_conn_string(
-    os.environ["PGURI"]
-).__aenter__()
-await checkpointer.setup()  # one-time DDL — idempotent
-GRAPH = _build_graph(checkpointer=checkpointer)
-```
-
-**Bundle** — add a Lakebase resource to `databricks.yml`:
-
-```yaml
-resources:
-  - name: state_db
-    database:
-      instance_name: <your-lakebase-instance>
-      database_name: databricks_postgres
-      permission: CAN_CONNECT_AND_CREATE
-```
-
-Lakebase is one of the resource types DABs natively supports (unlike the
-catalog/schema gap documented in [SETUP.md](./SETUP.md)). The app gets
-`PGHOST` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` env vars injected at
-runtime; assemble them into the connection string in code.
-
-That single swap turns this into a horizontally-scalable, restart-durable
-stateful agent. No other changes to the graph, the handlers, or the
-caller-side thread-id protocol.
+Restart-durable, horizontally-scalable, no hard-coded credentials.
 
 ## Local development
 
-```bash
-uv sync
-uv run start-server
-# In another shell:
-curl -X POST http://127.0.0.1:8000/responses ...
-```
+`AsyncCheckpointSaver` needs to talk to a real Lakebase endpoint, so
+true local-only development isn't possible against this branch without
+provisioning a tunnel. The pragmatic loop is "edit → `bundle deploy` →
+`bundle run`" (a sub-10s round trip on this codebase). See SETUP.md
+for the full iterate-and-debug commands.
