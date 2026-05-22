@@ -1,0 +1,48 @@
+bundle:
+  name: simple_apps_agent
+
+resources:
+  apps:
+    simple_agent:
+      name: simple-agent
+      source_code_path: ./
+      config:
+        # This command starts the app process.
+        # In practice you can use the same pattern the official templates use:
+        # uv run <startup-command>
+        command: ["uv", "run", "start-app"]
+        env:
+          # These wire MLflow in the same pattern shown in the Databricks agent docs.
+          - name: MLFLOW_TRACKING_URI
+            value: databricks
+          - name: MLFLOW_REGISTRY_URI
+            value: databricks-uc
+          - name: MLFLOW_EXPERIMENT_ID
+            value_from: experiment
+          - name: LLM_ENDPOINT_NAME
+            value_from: llm
+
+      resources:
+        - name: experiment
+          experiment:
+            # Replace with a real workspace experiment id.
+            experiment_id: "3212027249152542"
+            permission: CAN_EDIT
+
+        - name: llm
+          serving_endpoint:
+            name: databricks-claude-sonnet-4-5
+            permission: CAN_QUERY
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://<your-workspace-host>
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace-host>
+      root_path: /Workspace/Users/<service-principal-or-owner>/.bundle/${bundle.name}/${bundle.target}
