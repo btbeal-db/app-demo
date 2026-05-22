@@ -24,9 +24,12 @@ import agent_server.agent  # noqa: F401
 # AgentServer args:
 #   • "ResponsesAgent" — the agent kind. Tells the server to expose the
 #     /responses endpoint with Responses-API request/response shapes.
-#   • enable_chat_proxy=True — also exposes /chat/completions, which lets the
-#     Apps built-in chat UI and OpenAI-compatible clients talk to the agent
-#     without you writing a separate handler.
+#   • enable_chat_proxy=True — also mounts a /chat/completions route that
+#     translates OpenAI Chat-Completions-shaped requests into calls to the
+#     same @invoke / @stream handlers. Useful if you ever want to point an
+#     OpenAI SDK (or one of the fuller Databricks app templates that ships
+#     a chat frontend) at this app without writing a second handler. Set
+#     it to False if you only need /responses.
 server = AgentServer("ResponsesAgent", enable_chat_proxy=True)
 
 # Module-level ASGI app. This is referenced by `app_import_string` below and

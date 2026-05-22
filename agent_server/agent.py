@@ -104,7 +104,7 @@ async def stream_handler(
     """Streaming endpoint — yields ResponsesAgentStreamEvent objects.
 
     This is the only place that actually calls the LLM. AgentServer routes
-    /responses?stream=true (and Apps chat UI streaming) to this function.
+    `POST /responses?stream=true` to this function (server-sent events).
 
     For this minimal demo we call the LLM once with `ainvoke` (single async
     completion) and emit a single `response.output_item.done` event. A more
