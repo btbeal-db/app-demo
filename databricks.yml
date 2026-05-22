@@ -72,20 +72,43 @@ resources:
             name: databricks-claude-sonnet-4-5
             permission: CAN_QUERY
 
-        # MLflow 3 GenAI tracing writes spans into a UC table named
-        # `<exp_id>_otel_spans` under the experiment's configured trace
-        # storage location. The experiment grant above covers metadata
-        # only — we also need write access to this table or traces get
-        # dropped with PERMISSION_DENIED.
+        # ---------------------------------------------------------------
+        # Trace storage (MLflow 3 GenAI tracing)
+        # ---------------------------------------------------------------
+        # MLflow GenAI tracing writes spans into two UC tables under the
+        # experiment's configured trace storage location:
+        #   • <exp_id>_otel_spans       — the span events
+        #   • <exp_id>_otel_annotations — assessments / human feedback rows
+        # The experiment grant above covers experiment metadata only —
+        # without table-level grants the trace export drops every span
+        # with PERMISSION_DENIED.
         #
-        # Caveat: DABs `uc_securable` only supports CONNECTION / FUNCTION /
-        # TABLE / VOLUME (no CATALOG or SCHEMA) and one permission per
-        # entry. So this gives us the spans-table MODIFY; the matching
-        # USE CATALOG / USE SCHEMA / SELECT (and the `_otel_annotations`
-        # table) had to be granted via SQL once at setup time.
-        - name: trace_table
+        # The export path needs SELECT + MODIFY on each table, so we
+        # declare four uc_securable entries (DABs only takes one
+        # permission per entry).
+        #
+        # Caveat: DABs `uc_securable` does not support CATALOG / SCHEMA
+        # securable types, so the parent USE CATALOG / USE SCHEMA grants
+        # still have to be applied out-of-band via SQL once per workspace.
+        # See SETUP.md.
+        - name: trace_spans_select
           uc_securable:
             securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_spans
+            securable_type: TABLE
+            permission: SELECT
+        - name: trace_spans_modify
+          uc_securable:
+            securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_spans
+            securable_type: TABLE
+            permission: MODIFY
+        - name: trace_annotations_select
+          uc_securable:
+            securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_annotations
+            securable_type: TABLE
+            permission: SELECT
+        - name: trace_annotations_modify
+          uc_securable:
+            securable_full_name: agentbuilder_serverless_stable_catalog.brand_new_fancy_schema.3212027249152542_otel_annotations
             securable_type: TABLE
             permission: MODIFY
 

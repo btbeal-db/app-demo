@@ -32,15 +32,17 @@ experiment, deployed end-to-end via a Declarative Automation Bundle.
 
 ## Deploy
 
+See **[SETUP.md](./SETUP.md)** for the definitive walkthrough — including
+which resources the app needs, what permissions DABs handles for you,
+and the two `USE CATALOG` / `USE SCHEMA` grants you still have to apply
+by hand.
+
+TL;DR for an already-set-up workspace:
+
 ```bash
-# Validate the bundle config
-databricks bundle validate --profile=<profile>
-
-# Upload source + create/update the app + wire resource permissions
-databricks bundle deploy --profile=<profile>
-
-# Start the app (or restart it with the new source)
-databricks bundle run app_demo --profile=<profile>
+databricks bundle validate --profile <p>
+databricks bundle deploy   --profile <p>
+databricks bundle run app_demo --profile <p>
 ```
 
 ## Try it
@@ -80,14 +82,12 @@ var wired in `databricks.yml` means every request becomes a trace under the
 configured experiment. Open the experiment in the workspace → **Traces** tab
 to inspect inputs, outputs, latencies, and the underlying LLM call.
 
-> **Gotcha**: MLflow 3 GenAI tracing persists spans into Unity Catalog tables
-> (`<catalog>.<schema>.<exp_id>_otel_{spans,annotations}`). The `experiment`
-> resource grant in `databricks.yml` covers experiment metadata only; the
-> app's service principal also needs `USE CATALOG`, `USE SCHEMA`, and
-> `SELECT`+`MODIFY` on those UC tables. `databricks.yml` grants the
-> spans-table `MODIFY` via `uc_securable`; the others were granted once via
-> SQL at setup (DABs `uc_securable` doesn't support `CATALOG`/`SCHEMA` types
-> and only one permission per entry).
+> MLflow 3 GenAI tracing persists spans into Unity Catalog tables
+> (`<catalog>.<schema>.<exp_id>_otel_{spans,annotations}`), which means the
+> app's service principal needs permissions beyond just `CAN_MANAGE` on the
+> experiment. `databricks.yml` declares the four table-level grants;
+> `USE CATALOG` / `USE SCHEMA` are applied via SQL once per workspace —
+> see **[SETUP.md § 3d](./SETUP.md#3d-grant-the-sp-use-catalog-and-use-schema)**.
 
 ## Local development
 
