@@ -56,6 +56,35 @@ once via the workspace UI:
    (`/ml/experiments/<id>`).
 4. Note the catalog + schema you picked — you'll need both in step 3b.
 
+> **About the trace tables**: as soon as the experiment is created, the
+> platform eagerly creates **six** tables in the trace schema, all named
+> with a deterministic pattern:
+>
+> ```
+> <catalog>.<schema>.<exp_id>_otel_spans
+> <catalog>.<schema>.<exp_id>_otel_annotations
+> <catalog>.<schema>.<exp_id>_otel_logs
+> <catalog>.<schema>.<exp_id>_otel_metrics
+> <catalog>.<schema>.<exp_id>_trace_metadata
+> <catalog>.<schema>.<exp_id>_trace_unified
+> ```
+>
+> So you can fill in `databricks.yml` (step 3b) without having to "look
+> up" anything — once you have the catalog, schema, and experiment id,
+> every table name is determined.
+>
+> This minimal demo only writes to `_otel_spans` (request/response
+> spans) and `_otel_annotations` (assessments), so those are the two
+> tables `databricks.yml` grants on. If you extend the agent to emit
+> custom metrics or structured logs you'll see `PERMISSION_DENIED` on
+> `_otel_metrics` or `_otel_logs` — add matching `uc_securable` entries
+> when that happens.
+>
+> Confirm the tables exist before you deploy with `SHOW TABLES IN
+> <catalog>.<schema>` in the workspace SQL editor — you should see all
+> six rows. If the schema is empty, the experiment wasn't created as a
+> **GenAI** experiment (a plain ML experiment has no trace storage).
+
 ### 3b. Edit `databricks.yml` for your workspace
 
 Open `databricks.yml` and replace four values:
