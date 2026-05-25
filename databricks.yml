@@ -33,12 +33,15 @@ resources:
       source_code_path: ./
 
       config:
-        # The command Apps runs to start the process. `uv run start-server`
-        # invokes the `start-server` console script declared in
-        # pyproject.toml ([project.scripts]), which calls main() in
-        # agent_server/start_server.py. `uv` is the default package manager
-        # when the repo has a pyproject.toml.
-        command: ["uv", "run", "start-server"]
+        # The command Apps runs to start the process. We invoke uvicorn
+        # directly against the ASGI app exposed by start_server.py — no
+        # console-script indirection. Port 8000 matches both the Apps
+        # platform convention (it reverse-proxies external traffic to
+        # whatever the container binds on 8000) and the AgentServer.run()
+        # default. `uv` is the default package manager when the repo has
+        # a pyproject.toml.
+        command: ["uv", "run", "uvicorn", "agent_server.start_server:app",
+                  "--host", "0.0.0.0", "--port", "8000"]
 
         # Env vars injected into the running container.
         # `value:` is a literal string. `value_from:` looks up a resource by

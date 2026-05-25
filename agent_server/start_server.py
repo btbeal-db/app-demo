@@ -1,13 +1,23 @@
 # =============================================================================
-# start_server.py — boot the AgentServer + run Lakebase DDL at startup
+# start_server.py — build the FastAPI ASGI app + run Lakebase DDL at startup
 # =============================================================================
 #
 # Two things this file does:
-#   1. Build the AgentServer and expose its FastAPI ASGI app as `app`.
+#   1. Build the AgentServer and expose its FastAPI ASGI app as `app`. Uvicorn
+#      imports this module by the string `agent_server.start_server:app`
+#      (see databricks.yml's `command`) and serves the `app` attribute.
 #   2. Wrap the FastAPI lifespan so that `setup_lakebase()` runs exactly
 #      once when each uvicorn worker boots — this creates the checkpoint
 #      tables in Lakebase if they don't already exist (idempotent). Per-
 #      request handlers then assume the schema is ready.
+#
+# Adding custom endpoints? `server.app` is just a FastAPI instance, so you
+# can decorate functions on it directly — they coexist with the AgentServer-
+# managed routes (`/responses`, `/invocations`, `/health`, `/agent/info`):
+#
+#   @server.app.get("/threads/{thread_id}")
+#   async def get_thread(thread_id: str):
+#       ...
 # -----------------------------------------------------------------------------
 
 from contextlib import asynccontextmanager
@@ -32,7 +42,3 @@ async def _lifespan(asgi_app):
 
 
 app.router.lifespan_context = _lifespan
-
-
-def main():
-    server.run(app_import_string="agent_server.start_server:app")

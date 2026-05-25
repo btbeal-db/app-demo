@@ -6,15 +6,12 @@
 # and install the listed deps into the app container. (If a `requirements.txt`
 # is also present, pip is used instead and it takes precedence — we don't
 # include one, so uv handles everything.)
-#
-# The most important piece for an Apps deploy is the [project.scripts] entry
-# — that's the function `uv run start-server` calls in the container.
 # =============================================================================
 
 [build-system]
 # hatchling builds the wheel. Required so `agent_server` gets installed as a
-# proper Python package inside the container, which is what makes the
-# `agent_server.start_server:main` console script resolvable.
+# proper Python package inside the container, which is what makes uvicorn's
+# `agent_server.start_server:app` import string resolvable at runtime.
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
@@ -41,12 +38,7 @@ dependencies = [
 
 [tool.hatch.build.targets.wheel]
 # Tell hatchling which directory contains the importable package. Without
-# this, the wheel build can't find `agent_server/` and the console script
-# below can't resolve at runtime.
+# this, the wheel build can't find `agent_server/` and uvicorn can't import
+# `agent_server.start_server:app` at runtime.
 packages = ["agent_server"]
 
-[project.scripts]
-# Console script alias. After install, `start-server` (a real executable in
-# the venv's bin dir) calls main() in agent_server.start_server. This is
-# what `command: ["uv", "run", "start-server"]` in databricks.yml hits.
-start-server = "agent_server.start_server:main"
